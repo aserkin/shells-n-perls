@@ -7,6 +7,7 @@ PASS="password"
 DEST=.
 USAGE="$0 -l <nodelist w/spaces> -w <workdir default .> [-r (remove SSD from the node flash)]"
 
+
 while getopts l:w:rh option
 do
         case "${option}"
@@ -27,7 +28,7 @@ done
 
 #exit 0
 
-/home/als/bin/ssd.exp "$LST" $TS
+./ssd.exp "$LST" $TS
 
 #Collect SSDs
 for i in $LST
