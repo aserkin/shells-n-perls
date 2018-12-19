@@ -1,12 +1,9 @@
 #!/bin/bash
-# Version 1.0
-# Collect "show support details" output from the list of ASR5k nodes
-# Set username/password below
-USER="username"
+# Don't forget to set user/password below
+USER="user"
 PASS="password"
 DEST=.
 USAGE="$0 -l <nodelist w/spaces> -w <workdir default .> [-r (remove SSD from the node flash)]"
-
 
 while getopts l:w:rh option
 do
@@ -28,7 +25,35 @@ done
 
 #exit 0
 
-./ssd.exp "$LST" $TS
+/usr/bin/expect <(cat << 'EOD'
+set nodes [lindex $argv 0];
+set time [lindex $argv 1];
+set user [lindex $argv 2];
+set pass [lindex $argv 3];
+set timeout 5;
+array set spawn2node {};
+log_user 1;
+
+foreach connection $nodes {
+  spawn ssh -q $user@$connection
+  lappend spawn_id_list $spawn_id
+  set spawn2node($spawn_id) $connection
+  expect "assword:"
+  send "$pass\r";
+  expect "#"
+}
+
+set timeout 1200;
+foreach id $spawn_id_list {
+  set spawn_id $id
+  send "show support details to file /flash/sftp/SSD/SSD\_$spawn2node($spawn_id)\_$time compress -noconfirm\r";
+  expect "#"
+  send "exit\r";
+  expect eof;
+}
+EOD
+) "$LST" $TS $USER $PASS
+
 
 #Collect SSDs
 for i in $LST
