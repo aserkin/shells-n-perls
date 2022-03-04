@@ -6,16 +6,34 @@ import re
 import glob, os
 import sys
 import timeit
-from influxdb import InfluxDBClient
+from influxdb_client import WritePrecision, InfluxDBClient, Point
+from influxdb_client.client.write.retry import WritesRetry
+from influxdb_client.client.write_api import SYNCHRONOUS
+from multiprocessing import Pool
+import time
 
-config="/home/serkin/Tele2/bulk"				# config folder
-bulkDocFile=config+"/BulkstatStatistics_documentation.csv"      # file from StarOS companion archive
-bulkDR=config+"/r21-disc-reasons.txt"              		# show session disconnect-reasons verbose output (clean off extra strings except DRs)
-bulkCfgFileMME=config+"/r21-mme-schema.txt"        		# show bulkstat schema CLI output
-bulkCfgFileSAE=config+"/r21-sae-schema.txt"        		# clean off extra strings except named schemas' srtrings
-bulkList=config+"/bulk-schemas.txt"				# Required schemas' list one per line
-bulkDir=config+"/mmefiles"					# bulkstats files folder
-influx = InfluxDBClient(database='bulkstat')			# InfluxDB database connection (local or remote)
+# URL for Influxdb2 access
+url="http://localhost:8086"
+# bucket to store measurements into influxdb2
+bucket="bulkstat/yearly"
+# Access token for Influxdb2
+token="9iDwnBC78yjiG9hGFgvdiXSAHn2_t3uctiXK9LwErtLGb53ZHBfh_RdLlGGKoujjiIonppNQR-FZKq1GhqqcaA=="
+# Organization name
+org="CPM Ltd"
+# config folder
+config="/home/serkin/Tele2/bulk"
+# Path to bulkstats counters description (from companion-vpc-AA.BB.CC.tgz where AABBCC - StarOS release used)
+bulkDocFile=config+"/BulkstatStatistics_documentation.csv"
+# Disconnect reasons description (output from "show session disconnect-reasons verbose" command)
+bulkDR=config+"/r21-disc-reasons.txt"
+# MME bulkstats schema configuration (output from "show bulkstats schema" on MME)
+bulkCfgFileMME=config+"/r21-mme-schema.txt"
+# SAE bulkstats schema configuration (output from "show bulkstats schema" on SAEGW)
+bulkCfgFileSAE=config+"/r21-sae-schema.txt"
+# list of schemas' names used to collect statistics from
+bulkList=config+"/bulk-schemas.txt"
+# Path to the uncompressed bulkstats files
+bulkDir=config+"/mmefiles"
 
 def readWorkingSchemas(fileN):
   lineDict={}
@@ -121,7 +139,6 @@ def processBulk(fnam):
   for line in (bulklines):
     lines=line.splitlines()
     for row in csv.reader(lines, delimiter=',',quotechar='"'):
-#      print(row)
       try:
         if workingSchemas[row[2]]:
           fluxtpl = {
@@ -132,14 +149,13 @@ def processBulk(fnam):
               'fields': {
               }
             }
-          #row = list(filter(None, row))
+          if row[2] == 'systemSch71' and len(row[10]) == 0:
+            row[10] = "0=0;"
           fluxtpl['measurement'] = row[2]
           fluxtpl['time'] = int(row[3])
-#          print('\r'+row[2]+'dict length='+str(len(bulkDict[row[2]])))
-#          for i in range (7,len(row)):
-#          for i in range (7,len(bulkDict[row[2]])):
+          if row[11].startswith('%vlrname%'):     # skip fucking broken bulk string
+              continue
           for i in range (7,len(bulkDict[row[2]])+7):
-#            print(row[2]+' '+row[i]+'\r')
             if bulkDict[row[2]][i-7]['type'] == "Primary-key":
               if bulkDict[row[2]][i-7]['dtype'] == 'INT16' or bulkDict[row[2]][i-7]['dtype'] == 'INT32':
                 fluxtpl['tags'][bulkDict[row[2]][i-7]['name']] = int(row[i])
@@ -149,6 +165,8 @@ def processBulk(fnam):
                 fluxtpl['tags'][bulkDict[row[2]][i-7]['name']] = str(row[i])
             else:
               if len(row[i])==0:
+                row[i]=0
+              if str(row[i]).find('nan') != -1:
                 row[i]=0
               if bulkDict[row[2]][i-7]['dtype'] == 'INT16' or bulkDict[row[2]][i-7]['dtype'] == 'INT32':
                 fluxtpl['fields'][bulkDict[row[2]][i-7]['name']] = int(row[i])
@@ -179,25 +197,29 @@ def processBulk(fnam):
               fluxdr['tags']['node'] = n[0]
               fluxdr['tags']['disc-reason'] = di['system.disc-reason-'+drentry[0]]['descr']
               fluxdr['fields']['disc-count'] = float(drentry[1])
-#              print(json.dumps(fluxdr, indent=2))
               influxBulk.append(fluxdr)
       except KeyError: 
         continue
-  return influx.write_points(influxBulk,time_precision='s')
-#  return(True)
+  try:
+    write_api.write(bucket=bucket, org=org, record=influxBulk, write_precision=WritePrecision.S)
+    return True
+  except Exception as exc:
+    return exc
+  finally:
+    write_api.close()
 
 def workOnFile(fnam):
   try:
     f = open(bulkDir+'/'+fnam+'.p')
-#    print('skipped '+fnam)
     return(None)
   except FileNotFoundError:
     print('processing '+fnam+' ..',end=' ')
-    if processBulk(fnam) is True:
+    result = processBulk(fnam)
+    if result is True:
       print('success')
     else:
-      print('failed')
-      return(False)
+      print(result)
+      retirn(None)
   try:
     f = open(bulkDir+'/'+fnam+'.p', 'w')
     return(True)
@@ -251,6 +273,11 @@ bulkDict.update(bulkCfgDict(bulkCfgFileMME))
 # print('\r')
 bulkDict.update(bulkCfgDict(bulkCfgFileSAE))
 
+
+retries = WritesRetry(total=3, retry_interval=1, exponential_base=2)
+client = InfluxDBClient(url=url, token=token, org=org, retries=retries, enable_gzip=True)
+write_api = client.write_api(write_options=SYNCHRONOUS)
+
 os.chdir(bulkDir)
 blist=[]
 for bfile in sorted(glob.glob(fList)):
@@ -262,4 +289,5 @@ for fil in blist:
     continue
     print(fil)
 
+client.close()
 sys.exit()

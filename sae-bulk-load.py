@@ -6,16 +6,34 @@ import re
 import glob, os
 import sys
 import timeit
-from influxdb import InfluxDBClient
+from influxdb_client import WritePrecision, InfluxDBClient, Point
+from influxdb_client.client.write.retry import WritesRetry
+from influxdb_client.client.write_api import SYNCHRONOUS
+from multiprocessing import Pool
+import time
 
-config="/home/serkin/Tele2/bulk"				# config folder
-bulkDocFile=config+"/BulkstatStatistics_documentation.csv"      # file from StarOS companion archive
-bulkDR=config+"/r21-disc-reasons.txt"              		# show session disconnect-reasons verbose output (clean off extra strings except DRs)
-bulkCfgFileMME=config+"/r21-mme-schema.txt"        		# show bulkstat schema CLI output
-bulkCfgFileSAE=config+"/r21-sae-schema.txt"        		# clean off extra strings except named schemas' srtrings
-bulkList=config+"/sae-bulk-schemas.txt"				# Required schemas' list one per line
-bulkDir=config+"/files"					# bulkstats files folder
-influx = InfluxDBClient(database='bulkstat')			# InfluxDB database connection (local or remote)
+# URL for Influxdb2 access
+url="http://localhost:8086"
+# bucket to store measurements into influxdb2
+bucket="bulkstat/yearly"
+# Access token for Influxdb2
+token="9iDwnBC78yjiG9hGFgvdiXSAHn2_t3uctiXK9LwErtLGb53ZHBfh_RdLlGGKoujjiIonppNQR-FZKq1GhqqcaA=="
+# Organization name
+org="CPM Ltd"
+# config folder
+config="/home/serkin/Tele2/bulk"
+# Path to bulkstats counters description (from companion-vpc-AA.BB.CC.tgz where AABBCC - StarOS release used)
+bulkDocFile=config+"/BulkstatStatistics_documentation.csv"
+# Disconnect reasons description (output from "show session disconnect-reasons verbose" command)
+bulkDR=config+"/r21-disc-reasons.txt"
+# MME bulkstats schema configuration (output from "show bulkstats schema" on MME)
+bulkCfgFileMME=config+"/r21-mme-schema.txt"
+# SAE bulkstats schema configuration (output from "show bulkstats schema" on SAEGW)
+bulkCfgFileSAE=config+"/r21-sae-schema.txt"
+# list of schemas' names used to collect statistics from
+bulkList=config+"/sae-bulk-schemas.txt"
+# Path to the uncompressed bulkstats files
+bulkDir=config+"/files"
 
 def readWorkingSchemas(fileN):
   lineDict={}
@@ -129,6 +147,8 @@ def processBulk(fnam):
               'fields': {
               }
             }
+          if row[2] == 'systemSch71' and len(row[10]) == 0:
+            row[10] = "0=0;"
           row = list(filter(None, row))
           fluxtpl['measurement'] = row[2]
           fluxtpl['time'] = int(row[3])
@@ -156,7 +176,7 @@ def processBulk(fnam):
             continue
           else:
             influxBulk.append(fluxtpl)
-          if fluxtpl['measurement'] == 'systemSch71':	                                        # we need to process disconnect reasons separately
+          if row[2] == 'systemSch71':                                           # we need to process disconnect reasons separately
             fluxdr = {
               'measurement': '',
               'time': '',
@@ -184,13 +204,18 @@ def processBulk(fnam):
               influxBulk.append(fluxdr)
       except KeyError: 
         continue
-  return influx.write_points(influxBulk,time_precision='s')
-#  return(True)
+  try:
+#    print(json.dumps(influxBulk, indent=2))
+    write_api.write(bucket=bucket, org=org, record=influxBulk, write_precision=WritePrecision.S)
+    return True
+  except Exception as exc:
+    return exc
+  finally:
+    write_api.close()
 
 def workOnFile(fnam):
   try:
     f = open(bulkDir+'/'+fnam+'.p')
-#    print('skipped '+fnam)
     return(None)
   except FileNotFoundError:
     print('processing '+fnam+' ..',end=' ')
@@ -219,6 +244,10 @@ bulkDict={}
 bulkDict.update(bulkCfgDict(bulkCfgFileMME))
 bulkDict.update(bulkCfgDict(bulkCfgFileSAE))
 
+retries = WritesRetry(total=3, retry_interval=1, exponential_base=2)
+client = InfluxDBClient(url=url, token=token, org=org, retries=retries, enable_gzip=True)
+write_api = client.write_api(write_options=SYNCHRONOUS)
+
 os.chdir(bulkDir)
 blist=[]
 for bfile in sorted(glob.glob(fList)):
@@ -231,4 +260,5 @@ for fil in blist:
     print(fil)
 #    sys.exit()
 
+client.close()
 sys.exit()
